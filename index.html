@@ -154,7 +154,10 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .sc-btn{min-height:46px;border:0;border-radius:12px;padding:0 16px;background:#ffffff26;color:#fff;font-weight:600;backdrop-filter:blur(6px)}
 .sc-btn.go{background:#fff;color:#000}
 .sc-count{font-family:var(--f-num);font-size:24px;font-weight:600}
-.reticle{position:absolute;z-index:1;left:50%;top:42%;width:min(90vw,520px);height:min(34vw,170px);transform:translate(-50%,-50%);pointer-events:none}
+.reticle{position:absolute;z-index:1;left:50%;top:42%;width:min(90vw,520px);height:min(26vw,140px);transform:translate(-50%,-50%);pointer-events:none;border-radius:12px;box-shadow:0 0 0 100vmax rgba(0,0,0,.55)}
+.tap-ring{position:fixed;z-index:3;width:64px;height:64px;margin:-32px 0 0 -32px;border:3px solid #fff;border-radius:50%;opacity:0;pointer-events:none}
+.tap-ring.go{animation:ring .7s ease-out}
+@keyframes ring{0%{opacity:1;transform:scale(1.4)}100%{opacity:0;transform:scale(.7)}}
 .reticle i{position:absolute;width:30px;height:30px;border:4px solid #fff;opacity:.9}
 .reticle i:nth-child(1){left:0;top:0;border-right:0;border-bottom:0;border-radius:10px 0 0 0}
 .reticle i:nth-child(2){right:0;top:0;border-left:0;border-bottom:0;border-radius:0 10px 0 0}
@@ -235,6 +238,7 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
     <span class="sc-count" id="scCount"></span>
     <button class="sc-btn" id="scTorch" type="button" hidden>Linterna</button>
   </div>
+  <div class="tap-ring" id="tapRing"></div>
   <div class="reticle" id="reticle"><i></i><i></i><i></i><i></i></div>
   <div class="sc-err" id="scErr" hidden>
     <p id="scErrMsg"></p>
@@ -242,7 +246,7 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
   </div>
   <div class="sc-bottom">
     <div class="sc-feed" id="scFeed"></div>
-    <div class="sc-hint" id="scHint">Centra el código de barras dentro del marco</div>
+    <div class="sc-hint" id="scHint">Alinea solo el código de barras dentro del marco. Toca la pantalla para enfocar.</div>
   </div>
 </div>
 
@@ -257,7 +261,7 @@ var DB=null;            // {meta, tags:Map, emp:Map}
 var list=[];            // [{tag,t,dups}]
 var idx=new Map();      // tag -> entry
 var filter='all';
-var APP_VERSION='1.0.0';
+var APP_VERSION='1.1.0';
 
 /* ---------- utilidades ---------- */
 var fmt=function(n){return Number(n||0).toLocaleString('es-MX',{minimumFractionDigits:2,maximumFractionDigits:2})};
@@ -527,6 +531,8 @@ $('#manual').addEventListener('submit',function(ev){
 });
 
 /* ---------- decodificación ---------- */
+var fmtMode=(store.get('rr_fmt')==='all')?'all':'c39';
+function setFmt(m){fmtMode=m==='all'?'all':'c39';store.set('rr_fmt',fmtMode);natDet=undefined;zxReader=null}
 var natDet;
 async function getNative(){
   if(natDet!==undefined)return natDet;
@@ -534,7 +540,8 @@ async function getNative(){
   try{
     if('BarcodeDetector' in window){
       var sup=await BarcodeDetector.getSupportedFormats();
-      var f=['code_39','code_128','code_93','itf'].filter(function(x){return sup.indexOf(x)>=0});
+      var want=fmtMode==='all'?['code_39','code_128','code_93','itf']:['code_39'];
+      var f=want.filter(function(x){return sup.indexOf(x)>=0});
       if(f.length)natDet=new BarcodeDetector({formats:f});
     }
   }catch(e){}
@@ -546,7 +553,7 @@ function zxDecode(lum,w,h){
   try{
     if(!zxReader){
       var Z=window.ZXing,hints=new Map();
-      hints.set(Z.DecodeHintType.POSSIBLE_FORMATS,[Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.CODE_93,Z.BarcodeFormat.ITF]);
+      hints.set(Z.DecodeHintType.POSSIBLE_FORMATS,fmtMode==='all'?[Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.CODE_93,Z.BarcodeFormat.ITF]:[Z.BarcodeFormat.CODE_39]);
       hints.set(Z.DecodeHintType.TRY_HARDER,true);
       zxReader=new Z.MultiFormatReader();zxReader.setHints(hints);
     }
@@ -560,11 +567,36 @@ function lumOf(ctx,w,h){
   return o;
 }
 var fcv=document.createElement('canvas'),fctx=fcv.getContext('2d',{willReadFrequently:true});
-function zxFromVideo(v){
-  var vw=v.videoWidth,vh=v.videoHeight; if(!vw||!vh)return null;
-  var sc=Math.min(1,960/vw),w=Math.round(vw*sc),h2=Math.round(vh*sc);
-  fcv.width=w;fcv.height=h2;fctx.drawImage(v,0,0,w,h2);
-  return zxDecode(lumOf(fctx,w,h2),w,h2);
+// Convierte el marco de la pantalla a la zona correspondiente del video (el video llena la pantalla con recorte).
+function roiRect(vw,vh,vr,rr){
+  var W=vr.width,H=vr.height,s=Math.max(W/vw,H/vh),ox=(W-vw*s)/2,oy=(H-vh*s)/2;
+  var px=rr.width*0.12,py=rr.height*0.2;
+  var x=(rr.left-vr.left-px-ox)/s,y=(rr.top-vr.top-py-oy)/s,w=(rr.width+2*px)/s,h=(rr.height+2*py)/s;
+  var x1=Math.max(0,x),y1=Math.max(0,y),x2=Math.min(vw,x+w),y2=Math.min(vh,y+h);
+  return {x:x1,y:y1,w:Math.max(1,x2-x1),h:Math.max(1,y2-y1)};
+}
+function roiFrame(v){
+  var vw=v.videoWidth,vh=v.videoHeight;if(!vw||!vh)return null;
+  var r=roiRect(vw,vh,v.getBoundingClientRect(),$('#reticle').getBoundingClientRect());
+  var sc=Math.min(1,1280/r.w),cw=Math.max(1,Math.round(r.w*sc)),ch=Math.max(1,Math.round(r.h*sc));
+  fcv.width=cw;fcv.height=ch;fctx.drawImage(v,r.x,r.y,r.w,r.h,0,0,cw,ch);
+  return {cv:fcv,ctx:fctx,w:cw,h:ch};
+}
+async function readFrame(v,nat){
+  var f=roiFrame(v);if(!f)return null;
+  var code=null;
+  if(nat){try{var res=await nat.detect(f.cv);if(res.length)code=res[0].rawValue}catch(e){}}
+  if(!code&&(!nat||(++scan.n%3===0)))code=zxDecode(lumOf(f.ctx,f.w,f.h),f.w,f.h);
+  return code;
+}
+function plausible(code){
+  if(!/^\d{6,10}$/.test(code))return false;
+  if(!DB||!DB.tags.size)return true;
+  if(!DB.lens){
+    var c={},tot=0;DB.tags.forEach(function(v,k){c[k.length]=(c[k.length]||0)+1;tot++});
+    DB.lens={};for(var L in c)if(c[L]>=Math.max(3,tot*0.01))DB.lens[L]=1;
+  }
+  return !!DB.lens[code.length];
 }
 async function loadBitmap(file){
   try{return await createImageBitmap(file)}catch(e){}
@@ -604,13 +636,13 @@ var scan={stream:null,running:false,timer:null,n:0,seen:'',seenAt:0,session:0,fe
 function scErr(msg){$('#scErrMsg').textContent=msg;$('#scErr').hidden=false;$('#scHint').hidden=true}
 async function openScanner(){
   var sc=$('#scanner');sc.hidden=false;
-  $('#scErr').hidden=true;$('#scHint').hidden=false;$('#scFeed').textContent='';scan.feed=[];scan.session=0;scan.seen='';
+  $('#scErr').hidden=true;$('#scHint').hidden=false;$('#scFeed').textContent='';scan.feed=[];scan.session=0;scan.seen='';scan.cand=null;
   $('#scCount').textContent='';
   document.body.style.overflow='hidden';
   unlockAudio();
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){scErr('Este navegador no permite abrir la cámara aquí. Toma una foto de la etiqueta o escribe el número.');return}
   try{
-    scan.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
+    scan.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}});
   }catch(e){
     scErr(e&&e.name==='NotAllowedError'?'No hay permiso para usar la cámara. Actívalo para este sitio o toma una foto de la etiqueta.':'No se pudo abrir la cámara. Toma una foto de la etiqueta o escribe el número.');
     return;
@@ -630,10 +662,7 @@ async function openScanner(){
     var wait=nat?90:130;
     Promise.resolve().then(async function(){
       if(v.readyState<2)return null;
-      var code=null;
-      if(nat){try{var r=await nat.detect(v);if(r.length)code=r[0].rawValue}catch(e){}}
-      if(!code&&(!nat||(++scan.n%4===0)))code=zxFromVideo(v);
-      return code;
+      return readFrame(v,nat);
     }).then(function(code){if(code)onScan(code)}).catch(function(){}).then(function(){
       if(scan.running)scan.timer=setTimeout(tick,wait);
     });
@@ -645,8 +674,26 @@ function closeScanner(){
   $('#video').srcObject=null;$('#scanner').hidden=true;document.body.style.overflow='';
   render();
 }
+function tapFocus(x,y){
+  var v=$('#video'),t=scan.track;if(!t||!v.videoWidth)return;
+  var ring=$('#tapRing');ring.style.left=x+'px';ring.style.top=y+'px';ring.classList.remove('go');void ring.offsetWidth;ring.classList.add('go');
+  var caps={};try{caps=t.getCapabilities()}catch(e){}
+  if(!caps.focusMode)return;
+  var vr=v.getBoundingClientRect(),vw=v.videoWidth,vh=v.videoHeight,s=Math.max(vr.width/vw,vr.height/vh),ox=(vr.width-vw*s)/2,oy=(vr.height-vh*s)/2;
+  var pt={x:Math.min(1,Math.max(0,(x-vr.left-ox)/s/vw)),y:Math.min(1,Math.max(0,(y-vr.top-oy)/s/vh))};
+  var mode=caps.focusMode.indexOf('single-shot')>=0?'single-shot':'continuous';
+  try{t.applyConstraints({advanced:[{focusMode:mode,pointsOfInterest:[pt]}]}).catch(function(){})}catch(e){}
+  clearTimeout(scan.fTimer);
+  scan.fTimer=setTimeout(function(){try{t.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(function(){})}catch(e){}},2000);
+}
+$('#video').addEventListener('click',function(ev){tapFocus(ev.clientX,ev.clientY)});
 function onScan(raw){
   var now=Date.now(),code=String(raw).trim();
+  if(!plausible(code))return;                      // lecturas raras o de otro largo: se ignoran en silencio
+  var known=!!(DB&&DB.tags.has(code)),need=known?1:3;   // un tag desconocido debe leerse 3 veces seguidas
+  var c=scan.cand;
+  if(c&&c.code===code&&now-c.last<900){c.n++;c.last=now}else c=scan.cand={code:code,n:1,last:now};
+  if(c.n<need)return;
   if(code===scan.seen&&now-scan.seenAt<1500){scan.seenAt=now;return}   // sigue apuntando a la misma etiqueta
   scan.seen=code;scan.seenAt=now;
   var r=addCode(code);
@@ -711,6 +758,10 @@ function dataSheet(){
         h('dt',{text:'Con REVISIÓN = OK'}),h('dd',{text:int(m.nOk)})));
     }else b.appendChild(h('p',{text:'Todavía no hay datos cargados.'}));
     b.appendChild(h('p',{text:'Carga CONTROL-RECHAZOS.xlsx (hojas ETIQUETAS y EMPAQUE Y RECHAZOS). El archivo se lee dentro de tu teléfono y no se sube a ningún lado. Cárgalo otra vez cuando cambie Empaque y rechazos: los estatus de la lista se actualizan solos.'}));
+    b.appendChild(h('p',{text:'Tipo de código que lee el escáner: '+(fmtMode==='c39'?'solo Code 39 (el de tus etiquetas, recomendado).':'todos los tipos (puede leer números falsos).')}));
+    var fb=h('button',{type:'button',class:'btn',text:fmtMode==='c39'?'Leer todos los tipos':'Leer solo Code 39'});
+    fb.onclick=function(){setFmt(fmtMode==='c39'?'all':'c39');dataSheet()};
+    b.appendChild(h('div',{class:'stack'},fb));
     b.appendChild(h('p',{class:'ver',text:'Versión '+APP_VERSION}));
     var st=h('div',{class:'stack'});
     var load=h('button',{type:'button',class:'btn solid',text:DB?'Cargar archivo nuevo':'Cargar archivo de Excel'});load.onclick=pickExcel;st.appendChild(load);
@@ -788,7 +839,7 @@ try{
     navigator.serviceWorker.addEventListener('controllerchange',function(){if(hadCtl)toast('Hay una versión nueva. Cierra y vuelve a abrir la app para usarla.')});
   }
 }catch(e){}
-window.__rr={parseWorkbook:parseWorkbook,importBuffer:importBuffer,addCode:addCode,totals:totals,resolve:resolve,getList:function(){return list},removeTag:removeTag,buildXlsx:buildXlsx,render:render,getDB:function(){return DB},zxDecode:zxDecode};
+window.__rr={onScan:onScan,roiRect:roiRect,plausible:plausible,setFmt:setFmt,parseWorkbook:parseWorkbook,importBuffer:importBuffer,addCode:addCode,totals:totals,resolve:resolve,getList:function(){return list},removeTag:removeTag,buildXlsx:buildXlsx,render:render,getDB:function(){return DB},zxDecode:zxDecode};
 })();
 </script>
 </body>
